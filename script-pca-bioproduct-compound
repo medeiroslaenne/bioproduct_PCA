@@ -1,0 +1,174 @@
+# Load required packages
+library(tidyverse)
+library(FactoMineR)
+library(factoextra)
+library(ggrepel)
+
+# Function to analyze HPA data
+analyze_hpa_data <- function(input) {
+  # Check if input is a data frame or a file path
+  if (is.data.frame(input)) {
+    data <- input
+  } else if (is.character(input)) {
+    data <- read.csv(input, sep = ';')
+  } else {
+    stop("Input must be a data frame or a file path string")
+  }
+  
+  # Convert to factors
+  data$condicao <- as.factor(data$condicao)
+  data$replica <- as.factor(data$replica)
+  
+  # Transform data to wide format for PCA
+  data_wide <- data %>%
+    pivot_wider(
+      id_cols = c(condicao, replica),
+      names_from = composto,
+      values_from = concentracao,
+      values_fill = 0
+    )
+  
+  # Store condition and replica for later use
+  conditions <- data_wide$condicao
+  replicas <- data_wide$replica
+  
+  # Remove non-numeric columns for PCA
+  data_pca <- data_wide %>% select(-condicao, -replica)
+  
+  # Perform PCA
+  pca_result <- PCA(data_pca, scale.unit = TRUE, graph = FALSE)
+  
+  # Extract coordinates for plotting
+  ind_coords <- as.data.frame(pca_result$ind$coord[, 1:2])
+  ind_coords$condicao <- conditions
+  ind_coords$replica <- replicas
+  
+  # Get variable coordinates and contributions
+  var_coords <- as.data.frame(pca_result$var$coord[, 1:2])
+  var_coords$composto <- rownames(var_coords)
+  
+  var_contrib <- as.data.frame(pca_result$var$contrib)
+  var_contrib$composto <- rownames(var_contrib)
+  var_contrib$mean_contrib <- (var_contrib$Dim.1 + var_contrib$Dim.2) / 2
+  
+  # Combine for plotting
+  var_plot_data <- var_coords %>%
+    left_join(var_contrib %>% select(composto, mean_contrib), by = "composto")
+  
+  # Get variance explained
+  var_explained <- round(pca_result$eig[1:2, "percentage of variance"], 1)
+  
+  # Create PCA biplot - MODIFIED TO SEPARATE COLOR AESTHETICS
+  p <- ggplot() +
+    # Confidence ellipses by condition
+    stat_ellipse(data = ind_coords, aes(x = Dim.1, y = Dim.2, fill = condicao), 
+                 geom = "polygon", alpha = 0.2, level = 0.95) +
+    
+    # Sample points - CHANGED to use fill instead of color for conditions
+    geom_point(data = ind_coords, aes(x = Dim.1, y = Dim.2, fill = condicao), 
+               size = 3, alpha = 0.7, shape = 21, color = "black") +
+    
+    # Variable arrows - using 'contrib_color' instead of 'color'
+    geom_segment(data = var_plot_data, 
+                 aes(x = 0, y = 0, xend = Dim.1 * 5, yend = Dim.2 * 5, 
+                     color = mean_contrib),
+                 arrow = arrow(length = unit(0.3, "cm")), size = 0.8) +
+    
+    # Variable labels - also using 'contrib_color'
+    geom_text_repel(data = var_plot_data, 
+                    aes(x = Dim.1 * 5.2, y = Dim.2 * 5.2, 
+                        label = composto, color = mean_contrib),
+                    size = 4, segment.color = "grey50") +
+    
+    # Reference lines
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray60") +
+    
+    # Color scales - now properly separated
+    scale_fill_brewer(palette = "Set2") +  # For categorical condition values
+    scale_color_gradient2(low = "blue", mid = "purple", high = "red", 
+                          midpoint = mean(var_plot_data$mean_contrib)) +  # For continuous contribution values
+    
+    # Labels
+    labs(
+      title = "PCA - Compound Contribution Analysis",
+      x = paste0("PC1 (", var_explained[1], "%)"),
+      y = paste0("PC2 (", var_explained[2], "%)"),
+      color = "Contribution",
+      fill = "Condition"
+    ) +
+    
+    # Theme
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(size = 14, face = "bold")
+    )
+  
+  # Return results
+  list(
+    plot = p,
+    pca = pca_result,
+    top_contributors = var_contrib %>%
+      select(composto, Dim.1, Dim.2, mean_contrib) %>%
+      arrange(desc(mean_contrib))
+  )
+}
+
+# Read your data
+file_path <- "D:/Documents/laenne/fracao_liquida.csv"
+data <- read.csv(file_path, sep = ';')
+
+# Run the analysis
+results <- analyze_hpa_data(data)
+
+# View the plot
+print(results$plot)
+
+# Check top contributors
+print(results$top_contributors)
+
+
+
+# Function to create boxplots for top contributing compounds
+create_top_contributors_boxplot <- function(data, results, top_n = 5) {
+  # Get the top n contributors from the PCA results
+  top_compounds <- results$top_contributors %>%
+    head(top_n) %>%
+    pull(composto)
+  
+  # Filter the original long-format data for just these compounds
+  plot_data <- data %>%
+    filter(composto %in% top_compounds)
+  
+  # Make compound names a factor with levels ordered by contribution
+  plot_data$composto <- factor(plot_data$composto, 
+                               levels = top_compounds)
+  
+  # Create the boxplot
+  p <- ggplot(plot_data, aes(x = condicao, y = concentracao, fill = condicao)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = 1) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 1) +
+    facet_wrap(~ composto, scales = "free_y", ncol = 2) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = paste("Top", top_n, "Contributing Compounds by Condition"),
+      x = "Condition",
+      y = "Concentration",
+      fill = "Condition"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.background = element_rect(fill = "lightgray"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+  
+  return(p)
+}
+
+# Example usage:
+top_plots <- create_top_contributors_boxplot(data, results, top_n = 5)
+print(top_plots)
